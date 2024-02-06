@@ -4,6 +4,7 @@ import inspect
 import os
 import subprocess
 import sys
+import hashlib
 
 from .config import ServerConfig
 
@@ -43,9 +44,12 @@ def main(argv=sys.argv):
     scheme = None
     project = None
     skip_validate_bin = None
+    package = None
     while (arg := next(it, None)) is not None:
         if arg == "-workspace":
             workspace = next(it, None)
+        elif arg == "-package":
+            package = next(it, None)
         elif arg == "-scheme":
             scheme = next(it, None)
         elif arg == "-project":
@@ -75,6 +79,9 @@ def main(argv=sys.argv):
                     _usage("there are multiple xcodeproj in pwd, please specify one")
                 if len(projects) == 1:
                     return projects[0]
+                
+                if glob.glob("Package.swift"):
+                    return os.getcwd()
 
                 _usage("there no xcworkspace or xcodeproj in pwd, please specify one")
             else:
@@ -83,10 +90,14 @@ def main(argv=sys.argv):
         workspace = get_workspace()
 
     # find and record build_root for workspace and scheme
-    cmd = f"""xcodebuild -showBuildSettings -workspace '{workspace}' -scheme '{scheme}' 2>/dev/null | grep "\\bBUILD_DIR =" | head -1 | awk -F" = " '{{print $2}}' | tr -d '"' """
-    build_dir = subprocess.check_output(cmd, shell=True, universal_newlines=True)
-    build_root = os.path.join(build_dir, "../..")
-    build_root = os.path.abspath(build_root)
+    if not package is None:
+        dir_name = os.path.split(workspace)
+        build_root = os.path.expanduser("~/Library/Developer/Xcode/DerivedData/" + dir_name[1] + "-" + hashlib.md5(package.encode()).hexdigest()) 
+    else:
+        cmd = f"""xcodebuild -showBuildSettings -workspace '{workspace}' -scheme '{scheme}' 2>/dev/null | grep "\\bBUILD_DIR =" | head -1 | awk -F" = " '{{print $2}}' | tr -d '"' """
+        build_dir = subprocess.check_output(cmd, shell=True, universal_newlines=True)
+        build_root = os.path.join(build_dir, "../..")
+        build_root = os.path.abspath(build_root)
     print("find root:", build_root)
 
     config = ServerConfig.shared()
