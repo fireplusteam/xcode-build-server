@@ -32,6 +32,9 @@ def show_debug_help():
     exit(0)
 
 def serve():
+    if os.environ.get("XXX_BUILD_SERVER_KIT") != "/SERVE":
+        logging.info(f"Build server is not enabled, Use export XXX_BUILD_SERVER_KIT=/SERVE to turn it on")
+        return
     import server
     server.serve()
 
