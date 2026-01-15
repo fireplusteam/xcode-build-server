@@ -267,8 +267,8 @@ class CompileFileInfo:
     # hack new file into current compile file
     # return: set of filekey for match for file. or None if new_file can't be infered
     def new_file(self, filename):
-        # Currently only processing swift files
-        if not filename.endswith(".swift"):
+        file_extension = '.' + filename.split('.')[-1]
+        if file_extension not in {".swift", ".c", ".cpp", ".m", ".mm"}: # c/objective-c header files should be handled separately
             return
 
         if os.path.basename(filename) == "Package.swift":
@@ -283,7 +283,7 @@ class CompileFileInfo:
         # 1. First look for existing swift files in the current directory
         similar_compiled_file = next(
             (v for v in self.groupby_dir().get(
-                dir, ()) if v.endswith(".swift")), None
+                dir, ()) if v.endswith(file_extension)), None
         )
 
         # 2. If not found in current directory, search upward through parent directories until project root
@@ -295,7 +295,7 @@ class CompileFileInfo:
                 # Look for swift files in parent directory
                 similar_compiled_file = next(
                     (v for v in self.groupby_dir().get(
-                        parent_dir, ()) if v.endswith(".swift")), None
+                        parent_dir, ()) if v.endswith(file_extension)), None
                 )
                 if similar_compiled_file:
                     break
@@ -314,6 +314,15 @@ class CompileFileInfo:
 
         command = self.file_info[similar_compiled_file]
 
+        if file_extension != ".swift":
+            # update command info
+            self.groupby_dir()[dir].add(filename_key)
+            self.file_info[filename_key] = command
+            self.workspace_dir_info[filename_key] = self.workspace_dir_info.get(
+                similar_compiled_file
+            )
+            return set([filename_key])
+
         cmd_match = next(cmd_split_pattern.finditer(command), None)
         if not cmd_match:
             return
@@ -325,7 +334,7 @@ class CompileFileInfo:
         command = "".join(
             (command[:index], " ", quote(filename), command[index:]))
 
-        workspace_dir = self.workspace_dir_info[similar_compiled_file]
+        workspace_dir = self.workspace_dir_info.get(similar_compiled_file)
 
         # update command info
         self.groupby_dir()[dir].add(filename_key)
@@ -373,6 +382,17 @@ def GetFlagsInCompile(filename, compileFile, store):
         command = commandForFile(filename, compileFile, store)
         if command:
             flags = cmd_split(command)[1:]  # ignore executable
+
+            if filename.endswith((".c", ".cpp", ".m", ".mm")):
+                flags = flags + [
+                    "-Xclang",
+                    "-fallow-pch-with-compiler-errors",  # allow using headers even if there are errors
+                    "-Xclang",
+                    "-fallow-pcm-with-compiler-errors",
+                    "-Xclang",
+                    "-fmodule-format=raw",
+                ]
+                flags = list(filterCFlags(flags))
             return list(filterFlags(flags, store.setdefault("filelist", {})))
 
 
@@ -471,3 +491,91 @@ def InferFlagsForSwift(filename, compileFile, store):
         ]
 
     return final_flags
+
+
+def InferFlagsAndWorkingDirectoryForCFamily(filename, compileFile, store):
+    """try infer flags by convention and workspace files"""
+    filename = filekey(filename)
+    # only infer for header files as sourcekit does not provide suggestions for them without flags
+    if filename.endswith(('.h', '.hpp')):
+        filename_without_ext = '.'.join(filename.split('.')[:-1])
+
+        # 1. First look for existing of corresponding c/c++/m/mm files in the current directory
+        for ext in ('.c', '.cpp', '.m', '.mm'):
+            candidate_file_name = filename_without_ext + ext
+            final_flags = GetFlagsInCompile(candidate_file_name, compileFile, store)
+            if final_flags:
+                return list(filterCFlags(final_flags)), GetWorkingDirectory(candidate_file_name, compileFile, store)
+
+        dir = os.path.dirname(filename)
+        compile_file_info = compileFileInfoFromStore(compileFile, store)
+
+        # 2. If not found in current directory, search upward through parent directories until project root
+        current_dir = dir
+        while current_dir and current_dir != "/":
+
+            # Look for c/c++/m/mm files in parent directories
+            for candidate_file_name in compile_file_info.groupby_dir().get(current_dir, ()):
+                if candidate_file_name.endswith(('.c', '.cpp', '.m', '.mm')):
+                    final_flags = GetFlagsInCompile(candidate_file_name, compileFile, store)
+                    if final_flags:
+                        return list(filterCFlags(final_flags)), GetWorkingDirectory(candidate_file_name, compileFile, store)
+
+            parent_dir = os.path.dirname(current_dir)
+            # If reached project root, stop searching
+            if isProjectRoot(parent_dir):
+                break
+
+            current_dir = parent_dir
+    return None, None
+
+
+def filterCFlags(items):
+    """
+    f: should return True to accept, return number to skip next number flags
+    # all clang flags https://clang.llvm.org/docs/ClangCommandLineReference.html
+    """
+    it = iter(items)
+    next_it = iter(items)
+    next(next_it)
+    # the idea is to skip flags which emits output files or are specific to original source file which can break indexing for cpp/m/mm/c files
+    try:
+        while True:
+            arg: str = next(it)
+            next_arg: str | None = next(next_it, None)
+
+            if (
+                arg
+                in {  # we don't need these args for new file as they are specific to the original source file
+                    "-c",  # source file compile only
+                    "-o",  # output file
+                    "--output",
+                    "--serialize-diagnostics",  # diagnostics output path
+                    "-index-unit-output-path",  # index output path
+                    "-fbuild-session-file",  # build session file, not used by Xcode indexer
+                    "-ivfsstatcache",
+                }
+            ):
+                next(it)
+                next(next_it, None)
+                continue
+            if arg in ("-fno-temp-file",):  # disable temp file generation
+                continue
+            if any(
+                arg.startswith(prefix)
+                for prefix in [
+                    "-M",  # Flags controlling generation of a dependency file for make-like build systems.
+                    "-d",  # Flags allowing the state of the preprocessor to be dumped in various ways.
+                    "-fmodule-output",  # Save intermediate module file results when compiling a standard C++ module unit.
+                    "-foutput-class-dir",  # Set the output <dir> for compiled class files
+                    "-object-file-name",  # Set the output <file> for debug infos
+                    "--analyzer-output",  # Static analyzer output file
+                ]
+            ):
+                if not next_arg or not next_arg.startswith("-"):
+                    next(it)
+                    next(next_it, None)
+                continue
+            yield str(arg)
+    except StopIteration:
+        pass

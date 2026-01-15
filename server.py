@@ -13,6 +13,7 @@ from compile_database import (
     GetFlags,
     GetWorkingDirectory,
     InferFlagsForSwift,
+    InferFlagsAndWorkingDirectoryForCFamily,
     filekey,
     newfileForCompileFile,
 )
@@ -144,6 +145,9 @@ class State(object):
 
         working_directory = GetWorkingDirectory(file_path, self.compile_file, store=self.store)
 
+        if not flags:
+            flags, working_directory = InferFlagsAndWorkingDirectoryForCFamily(file_path, self.compile_file, store=self.store)
+
         self._notify_option_changed(uri, self.optionsForFlags(flags, working_directory))
 
     def unregister_uri(self, uri):
@@ -162,6 +166,9 @@ class State(object):
 
         working_directory = GetWorkingDirectory(file_path, self.compile_file, store=self.store)
 
+        if not flags:
+            flags, working_directory = InferFlagsAndWorkingDirectoryForCFamily(file_path, self.compile_file, store=self.store)
+
         if result := self.optionsForFlags(flags, working_directory):
             return {
                 "compilerArguments": result["options"],
@@ -175,6 +182,8 @@ class State(object):
         if not flags and file_path.endswith(".swift"):
             flags = InferFlagsForSwift(file_path, self.compile_file, store=self.store)
         working_directory = GetWorkingDirectory(file_path, self.compile_file, store=self.store)
+        if not flags:
+            flags, working_directory = InferFlagsAndWorkingDirectoryForCFamily(file_path, self.compile_file, store=self.store)
         return self.optionsForFlags(flags, working_directory)
 
     def optionsForFlags(self, flags, working_directory):
