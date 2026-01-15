@@ -267,8 +267,8 @@ class CompileFileInfo:
     # hack new file into current compile file
     # return: set of filekey for match for file. or None if new_file can't be infered
     def new_file(self, filename):
-        # Currently only processing swift files
-        if not filename.endswith(".swift"):
+        file_extension = '.' + filename.split('.')[-1]
+        if file_extension not in {".swift", ".c", ".cpp", ".m", ".mm"}: # c/objective-c header files should be handled separately
             return
 
         if os.path.basename(filename) == "Package.swift":
@@ -283,7 +283,7 @@ class CompileFileInfo:
         # 1. First look for existing swift files in the current directory
         similar_compiled_file = next(
             (v for v in self.groupby_dir().get(
-                dir, ()) if v.endswith(".swift")), None
+                dir, ()) if v.endswith(file_extension)), None
         )
 
         # 2. If not found in current directory, search upward through parent directories until project root
@@ -295,7 +295,7 @@ class CompileFileInfo:
                 # Look for swift files in parent directory
                 similar_compiled_file = next(
                     (v for v in self.groupby_dir().get(
-                        parent_dir, ()) if v.endswith(".swift")), None
+                        parent_dir, ()) if v.endswith(file_extension)), None
                 )
                 if similar_compiled_file:
                     break
@@ -314,6 +314,14 @@ class CompileFileInfo:
 
         command = self.file_info[similar_compiled_file]
 
+        if file_extension != ".swift":
+            # update command info
+            flags = cmd_split(command)[1:]
+            self.groupby_dir()[dir].add(filename_key)
+            self.file_info[filename_key] = ' '.join(filterCFlagsForNewFile(flags))
+            self.workspace_dir_info[filename_key] = self.workspace_dir_info.get(similar_compiled_file)
+            return set([filename_key])
+
         cmd_match = next(cmd_split_pattern.finditer(command), None)
         if not cmd_match:
             return
@@ -325,7 +333,7 @@ class CompileFileInfo:
         command = "".join(
             (command[:index], " ", quote(filename), command[index:]))
 
-        workspace_dir = self.workspace_dir_info[similar_compiled_file]
+        workspace_dir = self.workspace_dir_info.get(similar_compiled_file)
 
         # update command info
         self.groupby_dir()[dir].add(filename_key)
@@ -471,3 +479,82 @@ def InferFlagsForSwift(filename, compileFile, store):
         ]
 
     return final_flags
+
+
+def InferFlagsAndWorkingDirectoryForCFamily(filename, compileFile, store):
+    """try infer flags by convention and workspace files"""
+    filename = filekey(filename)
+    # only infer for header files as sourcekit does not provide suggestions for them without flags
+    if filename.endswith(('.h', '.hpp')):
+        filename_without_ext = '.'.join(filename.split('.')[:-1])
+
+        # 1. First look for existing of corresponding c/c++/m/mm files in the current directory
+        for ext in ('.c', '.cpp', '.m', '.mm'):
+            candidate_file_name = filename_without_ext + ext
+            final_flags = GetFlagsInCompile(candidate_file_name, compileFile, store)
+            if final_flags:
+                return list(filterCFlagsForNewFile(final_flags)), GetWorkingDirectory(candidate_file_name, compileFile, store)
+
+        dir = os.path.dirname(filename)
+        compile_file_info = compileFileInfoFromStore(compileFile, store)
+
+        # 2. If not found in current directory, search upward through parent directories until project root
+        current_dir = dir
+        while current_dir and current_dir != "/":
+            parent_dir = os.path.dirname(current_dir)
+
+            # Look for c/c++/m/mm files in parent directory
+            for candidate_file_name in compile_file_info.groupby_dir().get(parent_dir, ()):
+                if candidate_file_name.endswith(('.c', '.cpp', '.m', '.mm')):
+                    final_flags = GetFlagsInCompile(candidate_file_name, compileFile, store)
+                    if final_flags:
+                        return list(filterCFlagsForNewFile(final_flags)), GetWorkingDirectory(candidate_file_name, compileFile, store)
+
+            # If reached project root, stop searching
+            if isProjectRoot(parent_dir):
+                break
+
+            current_dir = parent_dir
+    return None, None
+
+
+def filterCFlagsForNewFile(items):
+    from itertools import tee
+
+    """
+    f: should return True to accept, return number to skip next number flags
+    # all clang flags https://clang.llvm.org/docs/ClangCommandLineReference.html
+    """
+    it = iter(items)
+    # the idea is to skip flags which emits output files or are specific to original source file which can break indexing for cpp/m/mm/c files
+    try:
+        while True:
+            arg: str = next(it)
+
+            if (
+                arg
+                in {  # we don't need these args for new file as they are specific to the original source file
+                    "-c",  # source file compile only
+                    "-o",  # output file
+                    "--output",
+                    "--serialize-diagnostics",  # diagnostics output path
+                    "-index-unit-output-path",  # index output path
+                }
+            ):
+                next(it)
+                continue
+            if arg in ("-fno-temp-file",):  # disable temp file generation
+                continue
+            if arg.startswith(
+                "-M",  # Flags controlling generation of a dependency file for make-like build systems.
+                "-d",  # Flags allowing the state of the preprocessor to be dumped in various ways.
+                "-fmodule-output",  # Save intermediate module file results when compiling a standard C++ module unit.
+                "-object-file-name",  # Set the output <file> for debug infos
+            ):
+                next = next(tee(it, 1)[0])
+                if next and not next.startswith("-"):
+                    next(it)
+                continue
+            yield str(arg)
+    except StopIteration:
+        pass
