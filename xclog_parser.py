@@ -412,7 +412,7 @@ def _parse(args):
     if args.output == "-":
         return dump_database(items, sys.stdout)
     if not args.output:
-        output = default_output_path
+        output = merge_to_xcode_compile_file()
 
         for index_store_path in parser.index_store_path:
             echo(f"use index_store_path at {index_store_path}")
@@ -426,7 +426,8 @@ def _parse(args):
         c = ServerConfig.shared()
         c.indexStorePath = index_store_path
         c.kind = "manual"
-        c.save()
+        # don't save manual build_root for default parse as this version is always used with extension and automated tools, should be always xcode kind
+        # c.save()
     else:
         output = args.output
 
@@ -485,7 +486,9 @@ def parse(argv):
         help="Setup levels of verbosity of output (e.g., -v -vv -vvv).\n -v is for passing through errors,\n -vv is for passing through errors and warnings,\n -vvv is for passing through error, warnings and notes."
     )
     a = parser.parse_args(argv[1:])
-    within_output_lock(a.output, lambda: _parse(a))
+    within_output_lock(
+        a.output if a.output else merge_to_xcode_compile_file(), lambda: _parse(a)
+    )
 
 
 def main(argv=sys.argv):
@@ -498,3 +501,25 @@ def main(argv=sys.argv):
 
 if __name__ == "__main__":
     main()
+
+
+# EXTENSION API TO MERGE building logs TO xcode-compile file from vscode-ios extension
+
+
+def merge_to_xcode_compile_file():
+    import server
+
+    dispatch = server.dispatch
+    handler = dispatch.get("build_initialize", "_")
+    handler(
+        message={
+            "id": 0,
+            "params": {
+                "rootUri": "file://" + os.getcwd(),
+                "bspVersion": "2.2.0",
+            },
+        }
+    )
+    state = server.shared_state
+    server.shared_state = None
+    return state.get_compile_file(state.config)

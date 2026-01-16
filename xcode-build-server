@@ -92,11 +92,18 @@ def main():
             serve()
         elif sys.argv[1] == "debug":
 
+            import xcactivitylog
+
             if sys.argv[2] == "print-xclog":
-                import xcactivitylog
+
                 for path in sys.argv[3:]:
                     print(f"extract xcactivitylog at {path}")
                     for l in xcactivitylog.extract_compile_log(path):
+                        print(l)
+            if sys.argv[2] == "print-build-log":
+                for path in sys.argv[3:]:
+                    print(f"extract build log at {path}")
+                    for l in xcactivitylog.extract_logs(path):
                         print(l)
             elif sys.argv[2] == "build":
                 import subprocess

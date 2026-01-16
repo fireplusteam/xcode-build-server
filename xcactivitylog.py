@@ -112,6 +112,18 @@ def extract_compile_log(path):
             yield ""  # a empty line means section log end
 
 
+def extract_logs(path):
+    for type, value in tokenizer(path):
+        # print(type, value)
+        if type != TokenType.String:
+            continue
+        assert isinstance(value, str)
+        lines = value.splitlines()
+        if len(lines) >= 1:
+            yield from iter(lines)
+            yield ""  # a empty line means section log end
+
+
 def newest_logpath(metapath: str, scheme=None):
     """returns None if no metapath or no logpath"""
     if not os.path.exists(metapath):
