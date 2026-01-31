@@ -519,22 +519,41 @@ def InferFlagsAndWorkingDirectoryForCFamily(filename, compileFile, store):
 
 
 def filterCFlagsForNewFile(items):
+    from itertools import tee
+
     """
     f: should return True to accept, return number to skip next number flags
+    # all clang flags https://clang.llvm.org/docs/ClangCommandLineReference.html
     """
     it = iter(items)
+    # the idea is to skip flags which emits output files or are specific to original source file which can break indexing for cpp/m/mm/c files
     try:
         while True:
             arg: str = next(it)
 
-            if arg in { # we don't need these args for new file as they are specific to the original source file
-                "-c", # source file compile only
-                "-o", # output file
-                "-MF", # dependency file output path
-                "--serialize-diagnostics", # diagnostics output path
-                "-index-unit-output-path", # index output path
-            }:
+            if (
+                arg
+                in {  # we don't need these args for new file as they are specific to the original source file
+                    "-c",  # source file compile only
+                    "-o",  # output file
+                    "--output",
+                    "--serialize-diagnostics",  # diagnostics output path
+                    "-index-unit-output-path",  # index output path
+                }
+            ):
                 next(it)
+                continue
+            if arg in ("-fno-temp-file",):  # disable temp file generation
+                continue
+            if arg.startswith(
+                "-M",  # Flags controlling generation of a dependency file for make-like build systems.
+                "-d",  # Flags allowing the state of the preprocessor to be dumped in various ways.
+                "-fmodule-output",  # Save intermediate module file results when compiling a standard C++ module unit.
+                "-object-file-name",  # Set the output <file> for debug infos
+            ):
+                next = next(tee(it, 1)[0])
+                if next and not next.startswith("-"):
+                    next(it)
                 continue
             yield str(arg)
     except StopIteration:
