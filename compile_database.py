@@ -316,10 +316,11 @@ class CompileFileInfo:
 
         if file_extension != ".swift":
             # update command info
-            flags = cmd_split(command)[1:]
             self.groupby_dir()[dir].add(filename_key)
-            self.file_info[filename_key] = ' '.join(filterCFlagsForNewFile(flags))
-            self.workspace_dir_info[filename_key] = self.workspace_dir_info.get(similar_compiled_file)
+            self.file_info[filename_key] = command
+            self.workspace_dir_info[filename_key] = self.workspace_dir_info.get(
+                similar_compiled_file
+            )
             return set([filename_key])
 
         cmd_match = next(cmd_split_pattern.finditer(command), None)
@@ -381,6 +382,17 @@ def GetFlagsInCompile(filename, compileFile, store):
         command = commandForFile(filename, compileFile, store)
         if command:
             flags = cmd_split(command)[1:]  # ignore executable
+
+            if filename.endswith((".c", ".cpp", ".m", ".mm")):
+                flags = flags + [
+                    "-Xclang",
+                    "-fallow-pch-with-compiler-errors",  # allow using headers even if there are errors
+                    "-Xclang",
+                    "-fallow-pcm-with-compiler-errors",
+                    "-Xclang",
+                    "-fmodule-format=raw",
+                ]
+                flags = list(filterCFlags(flags))
             return list(filterFlags(flags, store.setdefault("filelist", {})))
 
 
@@ -493,7 +505,7 @@ def InferFlagsAndWorkingDirectoryForCFamily(filename, compileFile, store):
             candidate_file_name = filename_without_ext + ext
             final_flags = GetFlagsInCompile(candidate_file_name, compileFile, store)
             if final_flags:
-                return list(filterCFlagsForNewFile(final_flags)), GetWorkingDirectory(candidate_file_name, compileFile, store)
+                return list(filterCFlags(final_flags)), GetWorkingDirectory(candidate_file_name, compileFile, store)
 
         dir = os.path.dirname(filename)
         compile_file_info = compileFileInfoFromStore(compileFile, store)
@@ -501,15 +513,15 @@ def InferFlagsAndWorkingDirectoryForCFamily(filename, compileFile, store):
         # 2. If not found in current directory, search upward through parent directories until project root
         current_dir = dir
         while current_dir and current_dir != "/":
-            parent_dir = os.path.dirname(current_dir)
 
-            # Look for c/c++/m/mm files in parent directory
-            for candidate_file_name in compile_file_info.groupby_dir().get(parent_dir, ()):
+            # Look for c/c++/m/mm files in parent directories
+            for candidate_file_name in compile_file_info.groupby_dir().get(current_dir, ()):
                 if candidate_file_name.endswith(('.c', '.cpp', '.m', '.mm')):
                     final_flags = GetFlagsInCompile(candidate_file_name, compileFile, store)
                     if final_flags:
-                        return list(filterCFlagsForNewFile(final_flags)), GetWorkingDirectory(candidate_file_name, compileFile, store)
+                        return list(filterCFlags(final_flags)), GetWorkingDirectory(candidate_file_name, compileFile, store)
 
+            parent_dir = os.path.dirname(current_dir)
             # If reached project root, stop searching
             if isProjectRoot(parent_dir):
                 break
@@ -518,7 +530,7 @@ def InferFlagsAndWorkingDirectoryForCFamily(filename, compileFile, store):
     return None, None
 
 
-def filterCFlagsForNewFile(items):
+def filterCFlags(items):
     """
     f: should return True to accept, return number to skip next number flags
     # all clang flags https://clang.llvm.org/docs/ClangCommandLineReference.html
@@ -540,6 +552,8 @@ def filterCFlagsForNewFile(items):
                     "--output",
                     "--serialize-diagnostics",  # diagnostics output path
                     "-index-unit-output-path",  # index output path
+                    "-fbuild-session-file",  # build session file, not used by Xcode indexer
+                    "-ivfsstatcache",
                 }
             ):
                 next(it)
@@ -553,10 +567,12 @@ def filterCFlagsForNewFile(items):
                     "-M",  # Flags controlling generation of a dependency file for make-like build systems.
                     "-d",  # Flags allowing the state of the preprocessor to be dumped in various ways.
                     "-fmodule-output",  # Save intermediate module file results when compiling a standard C++ module unit.
+                    "-foutput-class-dir",  # Set the output <dir> for compiled class files
                     "-object-file-name",  # Set the output <file> for debug infos
+                    "--analyzer-output",  # Static analyzer output file
                 ]
             ):
-                if next_arg and not next_arg.startswith("-"):
+                if not next_arg or not next_arg.startswith("-"):
                     next(it)
                     next(next_it, None)
                 continue
